@@ -6,7 +6,8 @@
 #![no_main]
 #![no_std]
 
-use bxcan::{ExtendedId, Frame, Id};
+use core::cmp::max;
+use bxcan::{ExtendedId, Frame, Id, TransmitStatus};
 use hal::dac::DacOut;
 
 // global logger + panicking-behavior + memory layout
@@ -27,7 +28,7 @@ mod app {
     use stm32f7xx_hal::rcc::RccExt;
     use stm32f7xx_hal::dac::DacPin;
     use systick_monotonic::*;
-    use systick_monotonic::fugit::RateExtU32;
+    use systick_monotonic::fugit::{Instant, RateExtU32};
     use bxcan::filter::Mask32;
     use bxcan::ExtendedId;
 
@@ -35,6 +36,7 @@ mod app {
         rcc::{HSEClock, HSEClockMode},
     };
     use stm32f7xx_hal::gpio::{Output, Pin};
+    use stm32f7xx_hal::timer::fugit::TimerInstantU64;
 
     #[monotonic(binds = SysTick, default = true)]
     type Mono = Systick<100>;
@@ -47,6 +49,9 @@ mod app {
         dac: hal::dac::C1,
         can: Can1,
         led: Pin<'B', 7, Output>,
+        lost_frames: u128,
+        frames: u128,
+        start_time: TimerInstantU64<100>,
     }
 
     #[init]
@@ -79,7 +84,7 @@ mod app {
 
             bxcan::Can::builder(can)
                 // APB1 (PCLK1): 54MHz, Bit rate: 250kBit/s, Sample Point 87.5%
-                .set_bit_timing(0x001e_000b) //1mb: 0x001e0002, 250k: 0x001e000, 500kb: 0x001e0005
+                .set_bit_timing(0x001e0002) //1mb: 0x001e0002, 250k: 0x001e000, 500kb: 0x001e0005
                 .leave_disabled()
         };
         can.enable_interrupt(bxcan::Interrupt::Fifo0MessagePending);
@@ -105,7 +110,7 @@ mod app {
 
         (
             Shared {},
-            Local { dac, can, led },
+            Local { dac, can, led, lost_frames: 0, frames: 0, start_time: monotonics::now() },
             init::Monotonics(mono),
         )
     }
@@ -118,7 +123,7 @@ mod app {
         #[task(local = [dac], capacity = 5, priority = 2)]
         fn write_throttle(_cx: write_throttle::Context, throttle: u8);
 
-        #[task(binds = CAN1_RX0, local = [can, led], priority = 1)]
+        #[task(binds = CAN1_RX0, local = [can, led, frames, start_time], priority = 1)]
         fn read_can(_cx: read_can::Context);
     }
 }
@@ -136,14 +141,14 @@ fn write_throttle(_cx: app::write_throttle::Context, throttle: u8) {
     //Percent of 3.1V
     let out_val = (throttle as f32 / 100.0) * 4092.0;
 
-    defmt::trace!("Writing {} to DAC", out_val as u16);
+    //defmt::trace!("Writing {} to DAC", out_val as u16);
 
     dac.set_value(out_val as u16);
 }
 
 /// Receives CAN frame on interrupt, then starts throttle write.
 fn read_can(_cx: app::read_can::Context) {
-    defmt::trace!("CAN interrupt fired");
+    //defmt::trace!("CAN interrupt fired");
 
     // How else could we know we got a frame?
     let led = _cx.local.led;
@@ -152,13 +157,25 @@ fn read_can(_cx: app::read_can::Context) {
     let can = _cx.local.can;
 
     if let Ok(frame) = can.receive() {
+        let inst = app::monotonics::now();
+        let start = _cx.local.start_time;
+        *_cx.local.frames += 1;
+
+        defmt::info!("AVG FPS: {}", *_cx.local.frames as f32 / max(inst.checked_duration_since(*start).unwrap().to_secs(), 1) as f32);
+
         //Percent should be encoded in the first data byte
         let percent = u8::from_le_bytes(frame.data().unwrap()[..1].try_into().unwrap());
 
-        defmt::trace!("Got frame percent: {}", percent);
+        //defmt::trace!("Got frame percent: {}", percent);
 
         app::write_throttle::spawn(percent).unwrap();
     } else {
-        defmt::error!("Lost a frame :(");
+        defmt::error!("Lost a frame, lowering speed");
+        *_cx.local.frames = 0;
+
+        // Tell teensy to slow down if we drop a frame
+        let data = [0u8; 8];
+        let frame = Frame::new_data(ExtendedId::new(0x0).unwrap(), data);
+        can.transmit(&frame);
     }
 }
