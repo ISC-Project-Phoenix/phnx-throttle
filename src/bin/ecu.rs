@@ -131,8 +131,13 @@ fn write_throttle(_cx: app::write_throttle::Context, throttle: u8) {
 
     let dac = _cx.local.dac;
 
-    //Percent of 3.1V
-    let out_val = (throttle as f32 / 100.0) * 4092.0;
+    /*
+    ESC uses differential voltage, so we need to invert our voltage.
+    4092 is 3.1V, and the ESCs lowest value that will still move
+    with no load is 3.8, so this should match roughly to the
+    actual full range the ESC can be set to.
+    */
+    let out_val = 4092.0 - (throttle as f32 / 100.0) * 4092.0;
 
     defmt::trace!("Writing {} to DAC", out_val as u16);
 
