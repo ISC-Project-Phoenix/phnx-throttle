@@ -12,6 +12,8 @@ use hal::dac::DacOut;
 use phnx_throttle as _;
 
 use stm32f7xx_hal as hal;
+use stm32f7xx_hal::adc::Adc;
+use stm32f7xx_hal::pac::ADC1;
 use stm32f7xx_hal::prelude::_embedded_hal_digital_ToggleableOutputPin;
 
 type Can1 = bxcan::Can<hal::can::Can<hal::pac::CAN1>>;
@@ -22,7 +24,7 @@ dispatchers = [SDMMC1, DCMI]
 )]
 mod app {
     use super::hal;
-    use crate::Can1;
+    use crate::{ADC1, Can1};
     use stm32f7xx_hal::rcc::RccExt;
     use stm32f7xx_hal::dac::DacPin;
     use systick_monotonic::*;
@@ -33,7 +35,10 @@ mod app {
     use stm32f7xx_hal::{
         rcc::{HSEClock, HSEClockMode},
     };
+    use stm32f7xx_hal::adc::Adc;
     use stm32f7xx_hal::gpio::{Output, Pin};
+    use stm32f7xx_hal::pac::ADC_COMMON;
+    use stm32f7xx_hal::adc::ChannelTimeSequence;
 
     #[monotonic(binds = SysTick, default = true)]
     type Mono = Systick<1000>;
@@ -46,6 +51,8 @@ mod app {
         dac: hal::dac::C1,
         can: Can1,
         led: Pin<'B', 7, Output>,
+        adc: Adc::<ADC1>,
+        adc_comm: ADC_COMMON,
     }
 
     #[init]
@@ -97,28 +104,69 @@ mod app {
         let mut dac = hal::dac::dac(dac, dac_pin);
         dac.enable();
 
+        // Configure ADC pedal in
+        let mut adc: Adc::<ADC1> = {
+            let adc1 = cx.device.ADC1;
+
+            // Configure with right align, 56 cycles, and 12 bits
+            Adc::<ADC1>::adc1(adc1, &mut rcc.apb2, &_clocks, 12, false, true)
+        };
+        adc.enable_eoc_interrupt();
+
+        // Read ADC off of pin PA0
+        let pa0 = gpioa.pa0;
+        adc.start_cont_reads(pa0.into_analog());
+
         // Ye-old debug LED
         let mut led = gpiob.pb7.into_push_pull_output();
         led.set_high();
 
+        // Pass in adc common registers to allow for reading reference voltage
+        let adc_comm = cx.device.ADC_COMMON;
+
         (
             Shared {},
-            Local { dac, can, led },
+            Local { dac, can, led, adc, adc_comm },
             init::Monotonics(mono),
         )
     }
 
     use crate::read_can;
     use crate::write_throttle;
+    use crate::read_pedal;
 
     //Extern tasks to make the autocomplete work
     extern "Rust" {
-        #[task(local = [dac], capacity = 5, priority = 2)]
+        #[task(local = [dac], capacity = 5, priority = 3)]
         fn write_throttle(_cx: write_throttle::Context, throttle: u8);
+
+        #[task(binds = ADC, local = [adc, adc_comm], priority = 2)]
+        fn read_pedal(_cx: read_pedal::Context);
 
         #[task(binds = CAN1_RX0, local = [can, led], priority = 1)]
         fn read_can(_cx: read_can::Context);
     }
+}
+
+/// Fired whenever the ADC has a new reading from the pedal, pressed or not
+fn read_pedal(_cx: app::read_pedal::Context) {
+    let adc = _cx.local.adc;
+    let com = _cx.local.adc_comm;
+
+    let reading = adc.read_cont_data();
+    // Voltage reading in mv
+    let vol = adc.bits_to_voltage(com, reading);
+
+    if vol < 100 {
+        return; // TODO calibrate resting voltage we can ignore
+    }
+
+    // Max voltage is 3.8V, so find percent and send it over to throttle write
+    let percent = ((3.8 / (vol as f32 / 1000.0)) * 100.0) as u8;
+
+    //TODO send auton kill message
+
+    app::write_throttle::spawn(percent).unwrap();
 }
 
 /// Writes 0-3.1V to the ESC, with the percent passed to the task.
