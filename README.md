@@ -9,6 +9,7 @@ See [the design doc](https://github.com/ISC-Project-Phoenix/design/blob/main/sof
 - Can rx: pb8
 - Can tx: pb9
 - Dac out: pa4
+- ADC in: pa0
 
 Transceiver is powered with 3v3 and Gnd.
 
