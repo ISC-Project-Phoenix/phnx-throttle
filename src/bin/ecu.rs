@@ -6,7 +6,10 @@
 #![no_main]
 #![no_std]
 
+use bxcan::{ExtendedId, Frame};
+use bxcan::Id::Extended;
 use hal::dac::DacOut;
+use rtic::mutex_prelude::{TupleExt03};
 
 // global logger + panicking-behavior + memory layout
 use phnx_throttle as _;
@@ -38,18 +41,22 @@ mod app {
     use stm32f7xx_hal::adc::Adc;
     use stm32f7xx_hal::gpio::{Output, Pin};
     use stm32f7xx_hal::pac::ADC_COMMON;
-    use stm32f7xx_hal::adc::ChannelTimeSequence;
 
     #[monotonic(binds = SysTick, default = true)]
     type Mono = Systick<1000>;
 
     #[shared]
-    struct Shared {}
+    struct Shared {
+        can: Can1,
+        /// If we are in training mode
+        training_mode: bool,
+        /// True if a pedal input has been received, and no new auton messages have been sent
+        auton_disabled: bool,
+    }
 
     #[local]
     struct Local {
         dac: hal::dac::C1,
-        can: Can1,
         led: Pin<'B', 7, Output>,
         adc: Adc::<ADC1>,
         adc_comm: ADC_COMMON,
@@ -85,13 +92,15 @@ mod app {
 
             bxcan::Can::builder(can)
                 .set_bit_timing(0x001e0005) //1mb: 0x001e0002, 250k: 0x001e000, 500kb: 0x001e0005
+                .set_loopback(false)
                 .leave_disabled()
         };
         can.enable_interrupt(bxcan::Interrupt::Fifo0MessagePending);
 
-        // Accept only throttle messages
+        // Filter for throttle and training messages
         let mut filters = can.modify_filters();
         filters.enable_bank(0, Mask32::frames_with_ext_id(ExtendedId::new(0x0000005).unwrap(), ExtendedId::MAX));
+        filters.enable_bank(1, Mask32::frames_with_ext_id(ExtendedId::new(0x0000007).unwrap(), ExtendedId::MAX));
         core::mem::drop(filters);
 
         if can.enable_non_blocking().is_err() {
@@ -108,7 +117,7 @@ mod app {
         let mut adc: Adc::<ADC1> = {
             let adc1 = cx.device.ADC1;
 
-            // Configure with right align, 56 cycles, and 12 bits
+            // Configure with right align, 56 cycles, 12 bits, continues mode
             Adc::<ADC1>::adc1(adc1, &mut rcc.apb2, &_clocks, 12, false, true)
         };
         adc.enable_eoc_interrupt();
@@ -116,6 +125,8 @@ mod app {
         // Read ADC off of pin PA0
         let pa0 = gpioa.pa0;
         adc.start_cont_reads(pa0.into_analog());
+
+        defmt::info!("Enabled DAC and ADC");
 
         // Ye-old debug LED
         let mut led = gpiob.pb7.into_push_pull_output();
@@ -125,8 +136,8 @@ mod app {
         let adc_comm = cx.device.ADC_COMMON;
 
         (
-            Shared {},
-            Local { dac, can, led, adc, adc_comm },
+            Shared { can, training_mode: false, auton_disabled: false },
+            Local { dac, led, adc, adc_comm },
             init::Monotonics(mono),
         )
     }
@@ -140,36 +151,57 @@ mod app {
         #[task(local = [dac], capacity = 5, priority = 3)]
         fn write_throttle(_cx: write_throttle::Context, throttle: u8);
 
-        #[task(binds = ADC, local = [adc, adc_comm], priority = 2)]
+        #[task(binds = ADC, local = [adc, adc_comm], shared = [can, training_mode, auton_disabled], priority = 2)]
         fn read_pedal(_cx: read_pedal::Context);
 
-        #[task(binds = CAN1_RX0, local = [can, led], priority = 1)]
+        #[task(binds = CAN1_RX0, local = [led], shared = [can, training_mode, auton_disabled], priority = 1)]
         fn read_can(_cx: read_can::Context);
     }
 }
 
 /// Fired whenever the ADC has a new reading from the pedal, pressed or not
 fn read_pedal(_cx: app::read_pedal::Context) {
+    defmt::trace!("Polling pedal...");
     let adc = _cx.local.adc;
     let com = _cx.local.adc_comm;
+
+    let app::read_pedal::SharedResources { can, training_mode, auton_disabled } = _cx.shared;
 
     let reading = adc.read_cont_data();
     // Voltage reading in mv
     let vol = adc.bits_to_voltage(com, reading);
 
+    defmt::trace!("Read ADC voltage of {}mv", vol);
+
     if vol < 100 {
+        defmt::trace!("Filtered ADC input");
         return; // TODO calibrate resting voltage we can ignore
     }
 
     // Max voltage is 3.8V, so find percent and send it over to throttle write
     let percent = ((3.8 / (vol as f32 / 1000.0)) * 100.0) as u8;
 
-    //TODO send auton kill message
+    (can, training_mode, auton_disabled).lock(|can, training_mode, auton_disabled| {
+        // Echo pedal reads if in training mode
+        if *training_mode {
+            let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
+            can.transmit(&frame).unwrap();
+        }
+
+        // Disable auton if we are currently in auton and the driver has pressed the pedal
+        if !*auton_disabled {
+            defmt::info!("Disabling auton");
+            *auton_disabled = true;
+            // This is an `auton disable` message
+            let frame = Frame::new_data(ExtendedId::ZERO, [0]);
+            can.transmit(&frame).unwrap();
+        }
+    });
 
     app::write_throttle::spawn(percent).unwrap();
 }
 
-/// Writes 0-3.1V to the ESC, with the percent passed to the task.
+/// Writes 3.1-0V to the ESC, with the percent passed to the task.
 fn write_throttle(_cx: app::write_throttle::Context, throttle: u8) {
     // This should be a percent, so just throw out invalid values
     if throttle > 100 {
@@ -200,16 +232,36 @@ fn read_can(_cx: app::read_can::Context) {
     let led = _cx.local.led;
     led.toggle();
 
-    let can = _cx.local.can;
+    let can = _cx.shared.can;
+    let training = _cx.shared.training_mode;
+    let auton_disabled = _cx.shared.auton_disabled;
 
-    if let Ok(frame) = can.receive() {
-        //Percent should be encoded in the first data byte
-        let percent = u8::from_le_bytes(frame.data().unwrap()[..1].try_into().unwrap());
+    (can, training, auton_disabled).lock(|can, training_mode, auton_disabled| {
+        if let Ok(frame) = can.receive() {
+            match frame.id() {
+                // Set Throttle
+                Extended(id) if id.as_raw() == 0x0000005 => {
+                    // If we receive a set throttle, we must be in auton
+                    *auton_disabled = false;
 
-        defmt::trace!("Got frame percent: {}", percent);
+                    //Percent should be encoded in the first data byte
+                    let percent = u8::from_le_bytes(frame.data().unwrap()[..1].try_into().unwrap());
 
-        app::write_throttle::spawn(percent).unwrap();
-    } else {
-        defmt::error!("Lost a frame :(");
-    }
+                    defmt::trace!("Got frame percent: {}", percent);
+
+                    app::write_throttle::spawn(percent).unwrap();
+                }
+                // Training Mode
+                Extended(id) if id.as_raw() == 0x0000007 => {
+                    defmt::info!("Engaging Training Mode");
+                    *training_mode = true;
+                }
+                _ => {
+                    defmt::error!("Received unintended CAN message")
+                }
+            }
+        } else {
+            defmt::error!("Lost a frame :(");
+        }
+    });
 }
