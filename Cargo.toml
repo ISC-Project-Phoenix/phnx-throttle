@@ -19,7 +19,6 @@ bxcan = "0.6.0" #must pin because of hal limit
 [dependencies.stm32f7xx-hal]
 version = "0.7.0"
 features = ["stm32f767", "rt", "rtic", "has-can"]
-git = "https://github.com/andyblarblar/stm32f7xx-hal"
 
 # cargo build/run
 [profile.dev]

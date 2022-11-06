@@ -15,9 +15,9 @@ use rtic::mutex_prelude::{TupleExt03};
 use phnx_throttle as _;
 
 use stm32f7xx_hal as hal;
-use stm32f7xx_hal::adc::Adc;
-use stm32f7xx_hal::pac::ADC1;
-use stm32f7xx_hal::prelude::_embedded_hal_digital_ToggleableOutputPin;
+use stm32f7xx_hal::pac::{ADC1};
+use stm32f7xx_hal::prelude::{_embedded_hal_adc_OneShot, _embedded_hal_digital_ToggleableOutputPin};
+use systick_monotonic::fugit::Duration;
 
 type Can1 = bxcan::Can<hal::can::Can<hal::pac::CAN1>>;
 
@@ -27,7 +27,7 @@ dispatchers = [SDMMC1, DCMI]
 )]
 mod app {
     use super::hal;
-    use crate::{ADC1, Can1};
+    use crate::{ADC1, Can1, Duration};
     use stm32f7xx_hal::rcc::RccExt;
     use stm32f7xx_hal::dac::DacPin;
     use systick_monotonic::*;
@@ -41,6 +41,7 @@ mod app {
     use stm32f7xx_hal::adc::Adc;
     use stm32f7xx_hal::gpio::{Output, Pin};
     use stm32f7xx_hal::pac::ADC_COMMON;
+    use crate::hal::gpio::Analog;
 
     #[monotonic(binds = SysTick, default = true)]
     type Mono = Systick<1000>;
@@ -60,6 +61,7 @@ mod app {
         led: Pin<'B', 7, Output>,
         adc: Adc::<ADC1>,
         adc_comm: ADC_COMMON,
+        adc_chan: Pin<'A', 0, Analog>,
     }
 
     #[init]
@@ -114,17 +116,15 @@ mod app {
         dac.enable();
 
         // Configure ADC pedal in
-        let mut adc: Adc::<ADC1> = {
+        let adc: Adc::<ADC1> = {
             let adc1 = cx.device.ADC1;
 
-            // Configure with right align, 56 cycles, 12 bits, continues mode
-            Adc::<ADC1>::adc1(adc1, &mut rcc.apb2, &_clocks, 12, false, true)
+            // Configure with right align, 56 cycles, 12 bits
+            Adc::<ADC1>::adc1(adc1, &mut rcc.apb2, &_clocks, 12, false)
         };
-        adc.enable_eoc_interrupt();
 
         // Read ADC off of pin PA0
-        let pa0 = gpioa.pa0;
-        adc.start_cont_reads(pa0.into_analog());
+        let pa0 = gpioa.pa0.into_analog();
 
         defmt::info!("Enabled DAC and ADC");
 
@@ -135,9 +135,11 @@ mod app {
         // Pass in adc common registers to allow for reading reference voltage
         let adc_comm = cx.device.ADC_COMMON;
 
+        read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(10u64)).unwrap();
+
         (
             Shared { can, training_mode: false, auton_disabled: false },
-            Local { dac, led, adc, adc_comm },
+            Local { dac, led, adc, adc_comm, adc_chan: pa0 },
             init::Monotonics(mono),
         )
     }
@@ -151,7 +153,7 @@ mod app {
         #[task(local = [dac], capacity = 5, priority = 3)]
         fn write_throttle(_cx: write_throttle::Context, throttle: u8);
 
-        #[task(binds = ADC, local = [adc, adc_comm], shared = [can, training_mode, auton_disabled], priority = 2)]
+        #[task(capacity = 5, local = [adc, adc_comm, adc_chan], shared = [can, training_mode, auton_disabled], priority = 2)]
         fn read_pedal(_cx: read_pedal::Context);
 
         #[task(binds = CAN1_RX0, local = [led], shared = [can, training_mode, auton_disabled], priority = 1)]
@@ -161,25 +163,28 @@ mod app {
 
 /// Fired whenever the ADC has a new reading from the pedal, pressed or not
 fn read_pedal(_cx: app::read_pedal::Context) {
+    app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(10u64)).unwrap();
+
     defmt::trace!("Polling pedal...");
     let adc = _cx.local.adc;
+    let adc_chan = _cx.local.adc_chan;
     let com = _cx.local.adc_comm;
 
     let app::read_pedal::SharedResources { can, training_mode, auton_disabled } = _cx.shared;
 
-    let reading = adc.read_cont_data();
-    // Voltage reading in mv
-    let vol = adc.bits_to_voltage(com, reading);
+    let adc_read = adc.read(adc_chan).unwrap();
+    let vol_mv = adc.bits_to_voltage(&com, adc_read);
 
-    defmt::trace!("Read ADC voltage of {}mv", vol);
+    defmt::trace!("Read ADC voltage of {}mv", vol_mv);
 
-    if vol < 100 {
+    if vol_mv < 100 {
         defmt::trace!("Filtered ADC input");
         return; // TODO calibrate resting voltage we can ignore
     }
 
     // Max voltage is 3.8V, so find percent and send it over to throttle write
-    let percent = ((3.8 / (vol as f32 / 1000.0)) * 100.0) as u8;
+    let percent = ((vol_mv as f32 / 3800.0) * 100.0) as u8;
+    defmt::trace!("per: {}", percent);
 
     (can, training_mode, auton_disabled).lock(|can, training_mode, auton_disabled| {
         // Echo pedal reads if in training mode
@@ -205,7 +210,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
 fn write_throttle(_cx: app::write_throttle::Context, throttle: u8) {
     // This should be a percent, so just throw out invalid values
     if throttle > 100 {
-        defmt::error!("Ignoring invalid throttle percent");
+        defmt::error!("Ignoring invalid throttle percent: {}", throttle);
         return;
     }
 
