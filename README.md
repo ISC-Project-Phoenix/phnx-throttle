@@ -13,6 +13,8 @@ See [the design doc](https://github.com/ISC-Project-Phoenix/design/blob/main/sof
 
 Transceiver is powered with 3v3 and Gnd.
 
+Pedal is connected to 5v and Gnd, with the middle wire in pa0.
+
 The blue LED will blink with each Can message received.
 
 ## Building
