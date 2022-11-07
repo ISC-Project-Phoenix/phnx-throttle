@@ -9,7 +9,7 @@
 use bxcan::{ExtendedId, Frame};
 use bxcan::Id::Extended;
 use hal::dac::DacOut;
-use rtic::mutex_prelude::{TupleExt03};
+use rtic::mutex_prelude::{TupleExt02, TupleExt03};
 
 // global logger + panicking-behavior + memory layout
 use phnx_throttle as _;
@@ -62,6 +62,8 @@ mod app {
         adc: Adc::<ADC1>,
         adc_comm: ADC_COMMON,
         adc_chan: Pin<'A', 0, Analog>,
+        avg_read_window: f32,
+        avg_read_window_count: u8,
     }
 
     #[init]
@@ -139,7 +141,7 @@ mod app {
 
         (
             Shared { can, training_mode: false, auton_disabled: false },
-            Local { dac, led, adc, adc_comm, adc_chan: pa0 },
+            Local { dac, led, adc, adc_comm, adc_chan: pa0, avg_read_window_count: 0, avg_read_window: 0.0 },
             init::Monotonics(mono),
         )
     }
@@ -153,7 +155,7 @@ mod app {
         #[task(local = [dac], capacity = 5, priority = 3)]
         fn write_throttle(_cx: write_throttle::Context, throttle: u8);
 
-        #[task(capacity = 5, local = [adc, adc_comm, adc_chan], shared = [can, training_mode, auton_disabled], priority = 2)]
+        #[task(capacity = 5, local = [adc, adc_comm, adc_chan, avg_read_window, avg_read_window_count], shared = [can, training_mode, auton_disabled], priority = 2)]
         fn read_pedal(_cx: read_pedal::Context);
 
         #[task(binds = CAN1_RX0, local = [led], shared = [can, training_mode, auton_disabled], priority = 1)]
@@ -163,12 +165,14 @@ mod app {
 
 /// Fired whenever the ADC has a new reading from the pedal, pressed or not
 fn read_pedal(_cx: app::read_pedal::Context) {
-    app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(100u64)).unwrap();
+    app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(30u64)).unwrap();
 
     defmt::trace!("Polling pedal...");
     let adc = _cx.local.adc;
     let adc_chan = _cx.local.adc_chan;
     let com = _cx.local.adc_comm;
+    let read_avg = _cx.local.avg_read_window;
+    let read_avg_count = _cx.local.avg_read_window_count;
 
     let app::read_pedal::SharedResources { can, training_mode, auton_disabled } = _cx.shared;
 
@@ -176,11 +180,29 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     let adc_read = adc.read(adc_chan).unwrap();
     let vol_mv = adc.bits_to_voltage(&com, adc_read);
 
+    // Average out some noise TODO use some control method instead, we need to filter out outliers.
+    let vol_mv = if *read_avg_count < 10 {
+        *read_avg += vol_mv as f32;
+        *read_avg_count += 1;
+        (*read_avg / *read_avg_count as f32) as u16
+    } else {
+        *read_avg_count = 0;
+        *read_avg = 0.0;
+        vol_mv
+    };
+
     defmt::trace!("Read ADC voltage of {}mv", vol_mv);
 
     // Filter values outside of ADC range
-    if vol_mv < 10 || vol_mv > 2100 {
+    if vol_mv < 100 || vol_mv > 2100 {
         defmt::trace!("Filtered ADC input");
+        // If training mode, send 0 message
+        (training_mode, can).lock(|tm, can| {
+            if *tm {
+                let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [0, 0, 0, 0, 0, 0, 0, 0]);
+                can.transmit(&frame).unwrap();
+            }
+        });
         return;
     }
 
