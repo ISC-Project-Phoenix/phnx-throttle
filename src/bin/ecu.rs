@@ -163,7 +163,7 @@ mod app {
 
 /// Fired whenever the ADC has a new reading from the pedal, pressed or not
 fn read_pedal(_cx: app::read_pedal::Context) {
-    app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(10u64)).unwrap();
+    app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(100u64)).unwrap();
 
     defmt::trace!("Polling pedal...");
     let adc = _cx.local.adc;
@@ -172,24 +172,32 @@ fn read_pedal(_cx: app::read_pedal::Context) {
 
     let app::read_pedal::SharedResources { can, training_mode, auton_disabled } = _cx.shared;
 
+    // Read and normalize our voltage
     let adc_read = adc.read(adc_chan).unwrap();
     let vol_mv = adc.bits_to_voltage(&com, adc_read);
 
     defmt::trace!("Read ADC voltage of {}mv", vol_mv);
 
-    if vol_mv < 100 {
+    // Filter values outside of ADC range
+    if vol_mv < 10 || vol_mv > 2100 {
         defmt::trace!("Filtered ADC input");
-        return; // TODO calibrate resting voltage we can ignore
+        return;
     }
 
-    // Max voltage is 3.8V, so find percent and send it over to throttle write
-    let percent = ((vol_mv as f32 / 3800.0) * 100.0) as u8;
+    // Convert to volts
+    let vol = vol_mv as f32 / 1000.0;
+
+    // Correct for non-linear voltage divider R2 with R1 = 7.5kohm, R2 = Throttle, Vo = measurement, Vi = 5v
+    let throttle_resistence = -(7500.0 * vol / (vol - 5.0));
+
+    // Throttle is linear and 5kohm at max
+    let percent = (throttle_resistence / 5000.0) * 100.0;
     defmt::trace!("per: {}", percent);
 
     (can, training_mode, auton_disabled).lock(|can, training_mode, auton_disabled| {
         // Echo pedal reads if in training mode
         if *training_mode {
-            let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
+            let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent as u8, 0, 0, 0, 0, 0, 0, 0]);
             can.transmit(&frame).unwrap();
         }
 
@@ -203,7 +211,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
         }
     });
 
-    app::write_throttle::spawn(percent).unwrap();
+    app::write_throttle::spawn(percent as u8).unwrap();
 }
 
 /// Writes 3.1-0V to the ESC, with the percent passed to the task.
