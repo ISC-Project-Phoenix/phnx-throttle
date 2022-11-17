@@ -164,7 +164,12 @@ mod app {
 
 /// Fired whenever the ADC has a new reading from the pedal, pressed or not
 fn read_pedal(_cx: app::read_pedal::Context) {
-    app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(30u64)).unwrap();
+    // poll full speed if testing raw voltage
+    if cfg!(vol_out) {
+        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(3u64)).unwrap();
+    } else {
+        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(30u64)).unwrap();
+    }
 
     defmt::trace!("Polling pedal...");
     let adc = _cx.local.adc;
@@ -175,25 +180,29 @@ fn read_pedal(_cx: app::read_pedal::Context) {
 
     // Read and normalize our voltage
     let adc_read = adc.read(adc_chan).unwrap();
-    let vol_mv = adc.bits_to_voltage(&com, adc_read);
+    let mut vol_mv = adc.bits_to_voltage(&com, adc_read);
 
-    // Smooth reading with kalman filter.
-    let kalman = _cx.local.kalman;
-    let vol_mv = kalman.filter(vol_mv as f32, 1.0, |x| x, |v| v + 0.001) as u16;
+    if cfg!(kalman) {
+        // Smooth reading with kalman filter.
+        let kalman = _cx.local.kalman;
+        vol_mv = kalman.filter(vol_mv as f32, 0.005, |x| x, |v| v + 0.001) as u16;
+    }
 
     defmt::trace!("Read ADC voltage of {}mv", vol_mv);
 
-    // Filter values outside of ADC range
-    if vol_mv < 100 || vol_mv > 2100 {
-        defmt::trace!("Filtered ADC input");
-        // If training mode, send 0 message
-        (training_mode, can).lock(|tm, can| {
-            if *tm {
-                let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [0, 0, 0, 0, 0, 0, 0, 0]);
-                can.transmit(&frame).unwrap();
-            }
-        });
-        return;
+    if cfg!(not(vol_out)) {
+        // Filter values outside of ADC range
+        if vol_mv < 100 || vol_mv > 2100 {
+            defmt::trace!("Filtered ADC input");
+            // If training mode, send 0 message
+            (training_mode, can).lock(|tm, can| {
+                if *tm {
+                    let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [0, 0, 0, 0, 0, 0, 0, 0]);
+                    let _ = can.transmit(&frame);
+                }
+            });
+            return;
+        }
     }
 
     // Convert to volts
@@ -209,17 +218,25 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     (can, training_mode, auton_disabled).lock(|can, training_mode, auton_disabled| {
         // Echo pedal reads if in training mode
         if *training_mode {
-            let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
-            can.transmit(&frame).unwrap();
+            if cfg!(vol_out) {
+                let [vol1, vol2] = vol_mv.to_le_bytes();
+                let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [vol1, vol2, 0, 0, 0, 0, 0, 0]);
+                let _ = can.transmit(&frame);
+            } else {
+                let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
+                let _ = can.transmit(&frame);
+            }
         }
 
         // Disable auton if we are currently in auton and the driver has pressed the pedal
         if !*auton_disabled {
             defmt::info!("Disabling auton");
-            *auton_disabled = true;
             // This is an `auton disable` message
             let frame = Frame::new_data(ExtendedId::ZERO, [0]);
-            can.transmit(&frame).unwrap();
+            // If we couldn't send can message, it'll just retry on next ADC cycle
+            if let Ok(_) = can.transmit(&frame) {
+                *auton_disabled = true;
+            }
         }
     });
 

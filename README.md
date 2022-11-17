@@ -18,6 +18,13 @@ that its connected as 5v -> 7.5K resistor -> ADC -> pot in -> pot out (not wiper
 
 The blue LED will blink with each Can message received.
 
+# Features
+
+- `vol_out`: Has this ecu echo voltages in its throttle message rather than percents while in training mode. This is useful
+for gathering noise data and calibrating the kalman filter.
+- `kalman(default)`: Enables kalman smoothing. This has a minimal performance impact but great smoothing. Consider disabling
+when sampling noise.
+
 ## Building
 
 This codebase is designed to be run on an ST Nucleo-f767zi.
@@ -28,3 +35,4 @@ This codebase is designed to be run on an ST Nucleo-f767zi.
 4. `rustup target install thumbv7em-none-eabihf`
 5. build the repo with `cargo build` or `cargo build --release` and flash manually, or debug with
 `cargo run`.
+6. If testing noise, compile with `cargo run --no-default-features --features vol_out`

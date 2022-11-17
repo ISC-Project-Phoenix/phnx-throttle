@@ -4,6 +4,14 @@ name = "phnx-throttle"
 edition = "2021"
 version = "0.1.0"
 
+[features]
+default = ['kalman']
+
+# Outputs only voltage readings, not percent.
+vol_out = []
+# Enables kalman filter smooting
+kalman = []
+
 [workspace]
 members = ["testsuite"]
 
