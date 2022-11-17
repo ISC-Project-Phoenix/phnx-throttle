@@ -42,6 +42,7 @@ mod app {
     use stm32f7xx_hal::gpio::{Output, Pin};
     use stm32f7xx_hal::pac::ADC_COMMON;
     use crate::hal::gpio::Analog;
+    use ukalman::*;
 
     #[monotonic(binds = SysTick, default = true)]
     type Mono = Systick<1000>;
@@ -62,8 +63,6 @@ mod app {
         adc: Adc::<ADC1>,
         adc_comm: ADC_COMMON,
         adc_chan: Pin<'A', 0, Analog>,
-        avg_read_window: f32,
-        avg_read_window_count: u8,
     }
 
     #[init]
@@ -141,7 +140,7 @@ mod app {
 
         (
             Shared { can, training_mode: false, auton_disabled: false },
-            Local { dac, led, adc, adc_comm, adc_chan: pa0, avg_read_window_count: 0, avg_read_window: 0.0 },
+            Local { dac, led, adc, adc_comm, adc_chan: pa0 },
             init::Monotonics(mono),
         )
     }
@@ -155,7 +154,7 @@ mod app {
         #[task(local = [dac], capacity = 5, priority = 3)]
         fn write_throttle(_cx: write_throttle::Context, throttle: u8);
 
-        #[task(capacity = 5, local = [adc, adc_comm, adc_chan, avg_read_window, avg_read_window_count], shared = [can, training_mode, auton_disabled], priority = 2)]
+        #[task(capacity = 5, local = [adc, adc_comm, adc_chan, kalman: Kalman1D = Kalman1D::new(0.0, 100.0)], shared = [can, training_mode, auton_disabled], priority = 2)]
         fn read_pedal(_cx: read_pedal::Context);
 
         #[task(binds = CAN1_RX0, local = [led], shared = [can, training_mode, auton_disabled], priority = 1)]
@@ -171,8 +170,6 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     let adc = _cx.local.adc;
     let adc_chan = _cx.local.adc_chan;
     let com = _cx.local.adc_comm;
-    let read_avg = _cx.local.avg_read_window;
-    let read_avg_count = _cx.local.avg_read_window_count;
 
     let app::read_pedal::SharedResources { can, training_mode, auton_disabled } = _cx.shared;
 
@@ -180,16 +177,9 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     let adc_read = adc.read(adc_chan).unwrap();
     let vol_mv = adc.bits_to_voltage(&com, adc_read);
 
-    // Average out some noise TODO use some control method instead, we need to filter out outliers.
-    let vol_mv = if *read_avg_count < 10 {
-        *read_avg += vol_mv as f32;
-        *read_avg_count += 1;
-        (*read_avg / *read_avg_count as f32) as u16
-    } else {
-        *read_avg_count = 0;
-        *read_avg = 0.0;
-        vol_mv
-    };
+    // Smooth reading with kalman filter.
+    let kalman = _cx.local.kalman;
+    let vol_mv = kalman.filter(vol_mv as f32, 1.0, |x| x, |v| v + 0.001) as u16;
 
     defmt::trace!("Read ADC voltage of {}mv", vol_mv);
 
@@ -213,13 +203,13 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     let throttle_resistence = -(7500.0 * vol / (vol - 5.0));
 
     // Throttle is linear and 5kohm at max
-    let percent = (throttle_resistence / 5000.0) * 100.0;
+    let percent = ((throttle_resistence / 5000.0) * 100.0) as u8;
     defmt::trace!("per: {}", percent);
 
     (can, training_mode, auton_disabled).lock(|can, training_mode, auton_disabled| {
         // Echo pedal reads if in training mode
         if *training_mode {
-            let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent as u8, 0, 0, 0, 0, 0, 0, 0]);
+            let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
             can.transmit(&frame).unwrap();
         }
 
