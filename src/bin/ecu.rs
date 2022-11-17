@@ -8,6 +8,7 @@
 
 use bxcan::{ExtendedId, Frame};
 use bxcan::Id::Extended;
+use defmt::println;
 use hal::dac::DacOut;
 use rtic::mutex_prelude::{TupleExt02, TupleExt03};
 
@@ -154,10 +155,10 @@ mod app {
         #[task(local = [dac], capacity = 5, priority = 3)]
         fn write_throttle(_cx: write_throttle::Context, throttle: u8);
 
-        #[task(capacity = 5, local = [adc, adc_comm, adc_chan, kalman: Kalman1D = Kalman1D::new(0.0, 100.0)], shared = [can, training_mode, auton_disabled], priority = 2)]
+        #[task(capacity = 5, local = [adc, adc_comm, adc_chan, kalman: Kalman1D = Kalman1D::new(0.0, 100.0)], shared = [can, training_mode, auton_disabled], priority = 1)]
         fn read_pedal(_cx: read_pedal::Context);
 
-        #[task(binds = CAN1_RX0, local = [led], shared = [can, training_mode, auton_disabled], priority = 1)]
+        #[task(binds = CAN1_RX0, local = [led], shared = [can, training_mode, auton_disabled], priority = 2)]
         fn read_can(_cx: read_can::Context);
     }
 }
@@ -165,9 +166,12 @@ mod app {
 /// Fired whenever the ADC has a new reading from the pedal, pressed or not
 fn read_pedal(_cx: app::read_pedal::Context) {
     // poll full speed if testing raw voltage
-    if cfg!(vol_out) {
-        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(3u64)).unwrap();
-    } else {
+    #[cfg(feature = "vol_out")]
+    {
+        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::nanos(100u64)).unwrap();
+    }
+    #[cfg(not(feature = "vol_out"))]
+    {
         app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(30u64)).unwrap();
     }
 
@@ -182,7 +186,8 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     let adc_read = adc.read(adc_chan).unwrap();
     let mut vol_mv = adc.bits_to_voltage(&com, adc_read);
 
-    if cfg!(kalman) {
+    #[cfg(feature = "kalman")]
+    {
         // Smooth reading with kalman filter.
         let kalman = _cx.local.kalman;
         vol_mv = kalman.filter(vol_mv as f32, 0.005, |x| x, |v| v + 0.001) as u16;
@@ -190,7 +195,8 @@ fn read_pedal(_cx: app::read_pedal::Context) {
 
     defmt::trace!("Read ADC voltage of {}mv", vol_mv);
 
-    if cfg!(not(vol_out)) {
+    #[cfg(not(feature = "vol_out"))]
+    {
         // Filter values outside of ADC range
         if vol_mv < 100 || vol_mv > 2100 {
             defmt::trace!("Filtered ADC input");
@@ -218,11 +224,14 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     (can, training_mode, auton_disabled).lock(|can, training_mode, auton_disabled| {
         // Echo pedal reads if in training mode
         if *training_mode {
-            if cfg!(vol_out) {
+            #[cfg(feature = "vol_out")]
+            {
                 let [vol1, vol2] = vol_mv.to_le_bytes();
                 let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [vol1, vol2, 0, 0, 0, 0, 0, 0]);
                 let _ = can.transmit(&frame);
-            } else {
+            }
+            #[cfg(not(feature = "vol_out"))]
+            {
                 let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
                 let _ = can.transmit(&frame);
             }
