@@ -1,16 +1,10 @@
-//! Program that takes throttle messages from CAN and outputs a voltage 0-3.1V from DAC, to
-//! control the ESC.
-//!
-//! Author: Andrew Ealovega
-
 #![no_main]
 #![no_std]
 
 use bxcan::{ExtendedId, Frame};
 use bxcan::Id::Extended;
-use defmt::println;
 use hal::dac::DacOut;
-use rtic::mutex_prelude::{TupleExt02, TupleExt03};
+use rtic::mutex_prelude::TupleExt03;
 
 // global logger + panicking-behavior + memory layout
 use phnx_throttle as _;

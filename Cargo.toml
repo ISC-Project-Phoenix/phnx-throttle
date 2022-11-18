@@ -24,7 +24,7 @@ cortex-m = "0.7"
 systick-monotonic = "1.0.0"
 bxcan = "0.6.0" #must pin because of hal limit
 
-ukalman = { path = "../ukalman" }
+ukalman = "0.1.0"
 
 [dependencies.stm32f7xx-hal]
 version = "0.7.0"
