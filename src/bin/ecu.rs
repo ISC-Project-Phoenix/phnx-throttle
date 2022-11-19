@@ -5,6 +5,7 @@ use bxcan::{ExtendedId, Frame};
 use bxcan::Id::Extended;
 use hal::dac::DacOut;
 use rtic::mutex_prelude::TupleExt03;
+use rtic::mutex_prelude::TupleExt02;
 
 // global logger + panicking-behavior + memory layout
 use phnx_throttle as _;
@@ -97,8 +98,8 @@ mod app {
 
         // Filter for throttle and training messages
         let mut filters = can.modify_filters();
-        filters.enable_bank(0, Mask32::frames_with_ext_id(ExtendedId::new(0x0000005).unwrap(), ExtendedId::MAX));
-        filters.enable_bank(1, Mask32::frames_with_ext_id(ExtendedId::new(0x0000007).unwrap(), ExtendedId::MAX));
+        filters.enable_bank(0, Mask32::frames_with_ext_id(ExtendedId::new(0x0000006).unwrap(), ExtendedId::MAX));
+        filters.enable_bank(1, Mask32::frames_with_ext_id(ExtendedId::new(0x0000008).unwrap(), ExtendedId::MAX));
         core::mem::drop(filters);
 
         if can.enable_non_blocking().is_err() {
@@ -162,11 +163,11 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     // poll full speed if testing raw voltage
     #[cfg(feature = "vol_out")]
     {
-        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::nanos(100u64)).unwrap();
+        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::nanos(1u64)).unwrap();
     }
     #[cfg(not(feature = "vol_out"))]
     {
-        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(30u64)).unwrap();
+        app::read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(10u64)).unwrap();
     }
 
     defmt::trace!("Polling pedal...");
@@ -197,7 +198,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
             // If training mode, send 0 message
             (training_mode, can).lock(|tm, can| {
                 if *tm {
-                    let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [0, 0, 0, 0, 0, 0, 0, 0]);
+                    let frame = Frame::new_data(ExtendedId::new(0x0000006).unwrap(), [0, 0, 0, 0, 0, 0, 0, 0]);
                     let _ = can.transmit(&frame);
                 }
             });
@@ -226,7 +227,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
             }
             #[cfg(not(feature = "vol_out"))]
             {
-                let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
+                let frame = Frame::new_data(ExtendedId::new(0x0000006).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
                 let _ = can.transmit(&frame);
             }
         }
@@ -285,7 +286,7 @@ fn read_can(_cx: app::read_can::Context) {
         if let Ok(frame) = can.receive() {
             match frame.id() {
                 // Set Throttle
-                Extended(id) if id.as_raw() == 0x0000005 => {
+                Extended(id) if id.as_raw() == 0x0000006 => {
                     // If we receive a set throttle, we must be in auton
                     *auton_disabled = false;
 
@@ -297,7 +298,7 @@ fn read_can(_cx: app::read_can::Context) {
                     app::write_throttle::spawn(percent).unwrap();
                 }
                 // Training Mode
-                Extended(id) if id.as_raw() == 0x0000007 => {
+                Extended(id) if id.as_raw() == 0x0000008 => {
                     defmt::info!("Engaging Training Mode");
                     *training_mode = true;
                 }
