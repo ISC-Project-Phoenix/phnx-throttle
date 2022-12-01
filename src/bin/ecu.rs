@@ -181,14 +181,15 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     let adc_read = adc.read(adc_chan).unwrap();
     let mut vol_mv = adc.bits_to_voltage(&com, adc_read);
 
+    defmt::trace!("Raw voltage out ${}$mv", vol_mv);
+
     #[cfg(feature = "kalman")]
     {
         // Smooth reading with kalman filter.
         let kalman = _cx.local.kalman;
-        vol_mv = kalman.filter(vol_mv as f32, 0.005, |x| x, |v| v + 0.001) as u16;
+        vol_mv = kalman.filter(vol_mv as f32, 0.05, |x| x, |v| v + 0.001) as u16;
+        defmt::trace!("Filter voltage out: %{}%", vol_mv);
     }
-
-    defmt::trace!("Read ADC voltage of {}mv", vol_mv);
 
     #[cfg(not(feature = "vol_out"))]
     {
