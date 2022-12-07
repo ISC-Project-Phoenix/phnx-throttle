@@ -11,9 +11,7 @@ use phnx_throttle as _;
 
 use stm32f7xx_hal as hal;
 use stm32f7xx_hal::pac::ADC1;
-use stm32f7xx_hal::prelude::{
-    _embedded_hal_adc_OneShot, _embedded_hal_digital_ToggleableOutputPin,
-};
+use stm32f7xx_hal::prelude::_embedded_hal_adc_OneShot;
 use systick_monotonic::fugit::Duration;
 
 type Can1 = bxcan::Can<hal::can::Can<hal::pac::CAN1>>;
@@ -202,7 +200,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
 
     // Read and normalize our voltage
     let adc_read = adc.read(adc_chan).unwrap();
-    let mut vol_mv = adc.bits_to_voltage(&com, adc_read);
+    let mut vol_mv = adc.bits_to_voltage(com, adc_read);
 
     defmt::trace!("Raw voltage out ${}$mv", vol_mv);
 
@@ -217,7 +215,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     #[cfg(not(feature = "vol_out"))]
     {
         // Filter values outside of ADC range
-        if vol_mv < 100 || vol_mv > 2100 {
+        if !(100..=2100).contains(&vol_mv) {
             defmt::trace!("Filtered ADC input");
             // If training mode, send 0 message
             (training_mode, can).lock(|tm, can| {
@@ -265,7 +263,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
             let frame = AutonDisable {}.into_frame().unwrap();
 
             // If we couldn't send can message, it'll just retry on next ADC cycle
-            if let Ok(_) = can.transmit(&frame) {
+            if can.transmit(&frame).is_ok() {
                 *auton_disabled = true;
             }
         }
