@@ -1,18 +1,19 @@
 #![no_main]
 #![no_std]
 
-use bxcan::{ExtendedId, Frame};
 use hal::dac::DacOut;
 use phnx_candefs::{AutonDisable, CanMessage, IscFrame, SetSpeed};
-use rtic::mutex_prelude::TupleExt03;
 use rtic::mutex_prelude::TupleExt02;
+use rtic::mutex_prelude::TupleExt03;
 
 // global logger + panicking-behavior + memory layout
 use phnx_throttle as _;
 
 use stm32f7xx_hal as hal;
-use stm32f7xx_hal::pac::{ADC1};
-use stm32f7xx_hal::prelude::{_embedded_hal_adc_OneShot, _embedded_hal_digital_ToggleableOutputPin};
+use stm32f7xx_hal::pac::ADC1;
+use stm32f7xx_hal::prelude::{
+    _embedded_hal_adc_OneShot, _embedded_hal_digital_ToggleableOutputPin,
+};
 use systick_monotonic::fugit::Duration;
 
 type Can1 = bxcan::Can<hal::can::Can<hal::pac::CAN1>>;
@@ -23,23 +24,21 @@ dispatchers = [SDMMC1, DCMI]
 )]
 mod app {
     use super::hal;
-    use crate::{ADC1, Can1, Duration};
-    use stm32f7xx_hal::rcc::RccExt;
-    use stm32f7xx_hal::dac::DacPin;
-    use systick_monotonic::*;
-    use systick_monotonic::fugit::RateExtU32;
+    use crate::{Can1, Duration, ADC1};
     use bxcan::filter::Mask32;
     use bxcan::{ExtendedId, Fifo};
     use phnx_candefs::{SetSpeed, TrainingMode};
+    use stm32f7xx_hal::dac::DacPin;
+    use stm32f7xx_hal::rcc::RccExt;
+    use systick_monotonic::fugit::RateExtU32;
+    use systick_monotonic::*;
 
-    use stm32f7xx_hal::{
-        rcc::{HSEClock, HSEClockMode},
-    };
+    use crate::hal::gpio::Analog;
+    use phnx_candefs::IscFrame;
     use stm32f7xx_hal::adc::Adc;
     use stm32f7xx_hal::gpio::{Output, Pin};
     use stm32f7xx_hal::pac::ADC_COMMON;
-    use crate::hal::gpio::Analog;
-    use phnx_candefs::IscFrame;
+    use stm32f7xx_hal::rcc::{HSEClock, HSEClockMode};
     use ukalman::*;
 
     #[monotonic(binds = SysTick, default = true)]
@@ -58,7 +57,7 @@ mod app {
     struct Local {
         dac: hal::dac::C1,
         led: Pin<'B', 7, Output>,
-        adc: Adc::<ADC1>,
+        adc: Adc<ADC1>,
         adc_comm: ADC_COMMON,
         adc_chan: Pin<'A', 0, Analog>,
     }
@@ -100,8 +99,16 @@ mod app {
 
         // Filter for throttle and training messages
         let mut filters = can.modify_filters();
-        filters.enable_bank(0, Fifo::Fifo0, Mask32::frames_with_ext_id(ExtendedId::new(SetSpeed::ID).unwrap(), ExtendedId::MAX));
-        filters.enable_bank(1, Fifo::Fifo0, Mask32::frames_with_ext_id(ExtendedId::new(TrainingMode::ID).unwrap(), ExtendedId::MAX));
+        filters.enable_bank(
+            0,
+            Fifo::Fifo0,
+            Mask32::frames_with_ext_id(ExtendedId::new(SetSpeed::ID).unwrap(), ExtendedId::MAX),
+        );
+        filters.enable_bank(
+            1,
+            Fifo::Fifo0,
+            Mask32::frames_with_ext_id(ExtendedId::new(TrainingMode::ID).unwrap(), ExtendedId::MAX),
+        );
         core::mem::drop(filters);
 
         if can.enable_non_blocking().is_err() {
@@ -115,7 +122,7 @@ mod app {
         dac.enable();
 
         // Configure ADC pedal in
-        let adc: Adc::<ADC1> = {
+        let adc: Adc<ADC1> = {
             let adc1 = cx.device.ADC1;
 
             // Configure with right align, 56 cycles, 12 bits
@@ -137,15 +144,25 @@ mod app {
         read_pedal::spawn_after(Duration::<u64, 1, 1000>::millis(10u64)).unwrap();
 
         (
-            Shared { can, training_mode: false, auton_disabled: false },
-            Local { dac, led, adc, adc_comm, adc_chan: pa0 },
+            Shared {
+                can,
+                training_mode: false,
+                auton_disabled: false,
+            },
+            Local {
+                dac,
+                led,
+                adc,
+                adc_comm,
+                adc_chan: pa0,
+            },
             init::Monotonics(mono),
         )
     }
 
     use crate::read_can;
-    use crate::write_throttle;
     use crate::read_pedal;
+    use crate::write_throttle;
 
     //Extern tasks to make the autocomplete work
     extern "Rust" {
@@ -177,7 +194,11 @@ fn read_pedal(_cx: app::read_pedal::Context) {
     let adc_chan = _cx.local.adc_chan;
     let com = _cx.local.adc_comm;
 
-    let app::read_pedal::SharedResources { can, training_mode, auton_disabled } = _cx.shared;
+    let app::read_pedal::SharedResources {
+        can,
+        training_mode,
+        auton_disabled,
+    } = _cx.shared;
 
     // Read and normalize our voltage
     let adc_read = adc.read(adc_chan).unwrap();
@@ -201,7 +222,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
             // If training mode, send 0 message
             (training_mode, can).lock(|tm, can| {
                 if *tm {
-                    let frame = SetSpeed{percent: 0}.into_frame().unwrap();
+                    let frame = SetSpeed { percent: 0 }.into_frame().unwrap();
                     let _ = can.transmit(&frame);
                 }
             });
@@ -225,12 +246,15 @@ fn read_pedal(_cx: app::read_pedal::Context) {
             #[cfg(feature = "vol_out")]
             {
                 let [vol1, vol2] = vol_mv.to_le_bytes();
-                let frame = Frame::new_data(ExtendedId::new(0x0000005).unwrap(), [vol1, vol2, 0, 0, 0, 0, 0, 0]);
+                let frame = Frame::new_data(
+                    ExtendedId::new(0x0000005).unwrap(),
+                    [vol1, vol2, 0, 0, 0, 0, 0, 0],
+                );
                 let _ = can.transmit(&frame);
             }
             #[cfg(not(feature = "vol_out"))]
             {
-                let frame = SetSpeed {percent}.into_frame().unwrap();
+                let frame = SetSpeed { percent }.into_frame().unwrap();
                 let _ = can.transmit(&frame);
             }
         }
@@ -238,7 +262,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
         // Disable auton if we are currently in auton and the driver has pressed the pedal
         if !*auton_disabled {
             defmt::info!("Disabling auton");
-            let frame = AutonDisable{}.into_frame().unwrap();
+            let frame = AutonDisable {}.into_frame().unwrap();
 
             // If we couldn't send can message, it'll just retry on next ADC cycle
             if let Ok(_) = can.transmit(&frame) {
@@ -302,7 +326,9 @@ fn read_can(_cx: app::read_can::Context) {
                         *training_mode = true;
                     }
                     _ => {
-                        defmt::error!("Invalid CAN id received! This is an error in the filter or candefs.")
+                        defmt::error!(
+                            "Invalid CAN id received! This is an error in the filter or candefs."
+                        )
                     }
                 }
             }
