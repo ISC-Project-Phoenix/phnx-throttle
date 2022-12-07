@@ -2,8 +2,8 @@
 #![no_std]
 
 use bxcan::{ExtendedId, Frame};
-use bxcan::Id::Extended;
 use hal::dac::DacOut;
+use phnx_candefs::{AutonDisable, CanMessage, IscFrame, SetSpeed};
 use rtic::mutex_prelude::TupleExt03;
 use rtic::mutex_prelude::TupleExt02;
 
@@ -29,7 +29,8 @@ mod app {
     use systick_monotonic::*;
     use systick_monotonic::fugit::RateExtU32;
     use bxcan::filter::Mask32;
-    use bxcan::ExtendedId;
+    use bxcan::{ExtendedId, Fifo};
+    use phnx_candefs::{SetSpeed, TrainingMode};
 
     use stm32f7xx_hal::{
         rcc::{HSEClock, HSEClockMode},
@@ -38,6 +39,7 @@ mod app {
     use stm32f7xx_hal::gpio::{Output, Pin};
     use stm32f7xx_hal::pac::ADC_COMMON;
     use crate::hal::gpio::Analog;
+    use phnx_candefs::IscFrame;
     use ukalman::*;
 
     #[monotonic(binds = SysTick, default = true)]
@@ -98,8 +100,8 @@ mod app {
 
         // Filter for throttle and training messages
         let mut filters = can.modify_filters();
-        filters.enable_bank(0, Mask32::frames_with_ext_id(ExtendedId::new(0x0000006).unwrap(), ExtendedId::MAX));
-        filters.enable_bank(1, Mask32::frames_with_ext_id(ExtendedId::new(0x0000008).unwrap(), ExtendedId::MAX));
+        filters.enable_bank(0, Fifo::Fifo0, Mask32::frames_with_ext_id(ExtendedId::new(SetSpeed::ID).unwrap(), ExtendedId::MAX));
+        filters.enable_bank(1, Fifo::Fifo0, Mask32::frames_with_ext_id(ExtendedId::new(TrainingMode::ID).unwrap(), ExtendedId::MAX));
         core::mem::drop(filters);
 
         if can.enable_non_blocking().is_err() {
@@ -199,7 +201,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
             // If training mode, send 0 message
             (training_mode, can).lock(|tm, can| {
                 if *tm {
-                    let frame = Frame::new_data(ExtendedId::new(0x0000006).unwrap(), [0, 0, 0, 0, 0, 0, 0, 0]);
+                    let frame = SetSpeed{percent: 0}.into_frame().unwrap();
                     let _ = can.transmit(&frame);
                 }
             });
@@ -228,7 +230,7 @@ fn read_pedal(_cx: app::read_pedal::Context) {
             }
             #[cfg(not(feature = "vol_out"))]
             {
-                let frame = Frame::new_data(ExtendedId::new(0x0000006).unwrap(), [percent, 0, 0, 0, 0, 0, 0, 0]);
+                let frame = SetSpeed {percent}.into_frame().unwrap();
                 let _ = can.transmit(&frame);
             }
         }
@@ -236,8 +238,8 @@ fn read_pedal(_cx: app::read_pedal::Context) {
         // Disable auton if we are currently in auton and the driver has pressed the pedal
         if !*auton_disabled {
             defmt::info!("Disabling auton");
-            // This is an `auton disable` message
-            let frame = Frame::new_data(ExtendedId::ZERO, [0]);
+            let frame = AutonDisable{}.into_frame().unwrap();
+
             // If we couldn't send can message, it'll just retry on next ADC cycle
             if let Ok(_) = can.transmit(&frame) {
                 *auton_disabled = true;
@@ -285,26 +287,23 @@ fn read_can(_cx: app::read_can::Context) {
 
     (can, training, auton_disabled).lock(|can, training_mode, auton_disabled| {
         if let Ok(frame) = can.receive() {
-            match frame.id() {
-                // Set Throttle
-                Extended(id) if id.as_raw() == 0x0000006 => {
-                    // If we receive a set throttle, we must be in auton
-                    *auton_disabled = false;
+            if let Ok(conv) = CanMessage::from_frame(frame) {
+                match conv {
+                    CanMessage::SetSpeed(sp) => {
+                        // If we receive a set throttle, we must be in auton
+                        *auton_disabled = false;
 
-                    //Percent should be encoded in the first data byte
-                    let percent = u8::from_le_bytes(frame.data().unwrap()[..1].try_into().unwrap());
+                        defmt::trace!("Got frame percent: {}", sp.percent);
 
-                    defmt::trace!("Got frame percent: {}", percent);
-
-                    app::write_throttle::spawn(percent).unwrap();
-                }
-                // Training Mode
-                Extended(id) if id.as_raw() == 0x0000008 => {
-                    defmt::info!("Engaging Training Mode");
-                    *training_mode = true;
-                }
-                _ => {
-                    defmt::error!("Received unintended CAN message")
+                        app::write_throttle::spawn(sp.percent).unwrap();
+                    }
+                    CanMessage::TrainingMode(_) => {
+                        defmt::info!("Engaging Training Mode");
+                        *training_mode = true;
+                    }
+                    _ => {
+                        defmt::error!("Invalid CAN id received! This is an error in the filter or candefs.")
+                    }
                 }
             }
         } else {
