@@ -30,7 +30,7 @@ phnx-candefs = { git = "https://github.com/ISC-Project-Phoenix/phnx-candefs.git"
 [dependencies.stm32f7xx-hal]
 version = "0.7.0"
 features = ["stm32f767", "rt", "rtic", "has-can"]
-git = "https://github.com/andyblarblar/stm32f7xx-hal.git"
+git = "https://github.com/stm32-rs/stm32f7xx-hal.git"
 
 # cargo build/run
 [profile.dev]

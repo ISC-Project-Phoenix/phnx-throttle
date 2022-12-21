@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+use bxcan::{ExtendedId, Frame};
 use hal::dac::DacOut;
 use phnx_candefs::{AutonDisable, CanMessage, IscFrame, SetSpeed};
 use rtic::mutex_prelude::TupleExt02;

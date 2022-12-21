@@ -2,7 +2,7 @@
 
 This is the codebase for Phoenix's throttle ECU, part of the drive by wire subsystem.
 
-See [the design doc](https://github.com/ISC-Project-Phoenix/design/blob/main/software/Throttle.md) for more info.
+See [the design doc](https://github.com/ISC-Project-Phoenix/design/blob/main/software/embed/Throttle.md) for more info.
 
 ## Pinout
 
